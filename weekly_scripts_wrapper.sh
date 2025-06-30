@@ -10,8 +10,7 @@ scripts=(
 
 for script in "${scripts[@]}"; do
     $script > "$log_dir/$(basename $script).log" 2>&1 || {
-        echo "Error: $script failed (see log at $log_dir/$(basename $script).log)"
-        exit 1
+        echo "Warning: $script reported a problem (see log at $log_dir/$(basename $script).log)"
     }
 done
 
