@@ -1,0 +1,11 @@
+# ignore build artifacts and other cruft
+target/
+**/target/
+
+# ignore the tarball and k8s yamls
+mcp-bitwarden.tar
+mcp-deployment.yaml
+mcp-service.yaml
+
+# standard ignores
+.dockerignore

@@ -1,0 +1,44 @@
+# Rust-specific build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# General build and dependency directories
+/dist/
+/build/
+/out/
+
+# Dependency directories
+/node_modules/
+/vendor/
+
+# Common editor and OS files
+.DS_Store
+*.swp
+*.swo
+*.swn
+.vscode/
+.idea/
+*.iml
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Environment and configuration files
+.env
+.env.local
+.env.*.local
+
+# Documentation build artifacts
+/docs/_build/
+/site/
+
+# Testing and coverage artifacts
+/coverage/
+/test-results/
+
+# Rust-specific cache and temporary files
+/.cargo/
+*.profraw
