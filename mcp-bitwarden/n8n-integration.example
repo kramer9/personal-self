@@ -1,0 +1,89 @@
+{
+  "n8n_examples": {
+    "http_request_node": {
+      "description": "Use HTTP Request node in n8n to fetch secrets",
+      "method": "GET",
+      "url": "http://bitwarden-mcp-server:8080/secret/{{$json.org_id}}/{{$json.secret_key}}",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "response_format": "json",
+      "example_response": {
+        "key": "api_key_name",
+        "value": "actual_secret_value"
+      }
+    },
+    
+    "workflow_example": {
+      "description": "Complete n8n workflow to get API key and use it",
+      "nodes": [
+        {
+          "name": "Start",
+          "type": "n8n-nodes-base.manualTrigger"
+        },
+        {
+          "name": "Get API Key from Bitwarden",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "method": "GET",
+            "url": "http://bitwarden-mcp-server:8080/secret/a45c69b8-28af-4a12-9c83-b3380121a0c2/my_api_key",
+            "responseFormat": "json"
+          }
+        },
+        {
+          "name": "Use API Key in External Service",
+          "type": "n8n-nodes-base.httpRequest",
+          "parameters": {
+            "method": "GET",
+            "url": "https://api.external-service.com/data",
+            "headers": {
+              "Authorization": "Bearer {{$json.value}}"
+            }
+          }
+        }
+      ]
+    },
+
+    "error_handling": {
+      "description": "Handle errors gracefully in n8n",
+      "error_workflow": {
+        "if_node": {
+          "condition": "={{$json.error}}",
+          "true_branch": "Log error and send notification",
+          "false_branch": "Continue with secret value"
+        }
+      }
+    },
+
+    "docker_network_setup": {
+      "description": "If running n8n in Docker/Podman, ensure network connectivity",
+      "commands": [
+        "podman network create n8n-network",
+        "podman run --network n8n-network --name bitwarden-mcp-server ...",
+        "podman run --network n8n-network --name n8n ..."
+      ],
+      "n8n_url": "http://bitwarden-mcp-server:8080/secret/{org_id}/{secret_key}"
+    }
+  },
+
+  "production_considerations": {
+    "security": [
+      "Run both containers in isolated network",
+      "Use container secrets management",
+      "Rotate BWS_ACCESS_TOKEN regularly",
+      "Monitor access logs"
+    ],
+    "reliability": [
+      "Set up container restart policies",
+      "Monitor health endpoints",
+      "Set resource limits",
+      "Use persistent logging"
+    ],
+    "performance": [
+      "Container uses ~128MB RAM",
+      "Response times typically <100ms",
+      "No persistent storage needed",
+      "Stateless and horizontally scalable"
+    ]
+  }
+}

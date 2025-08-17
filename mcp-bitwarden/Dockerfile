@@ -13,7 +13,59 @@ RUN rustup target add x86_64-unknown-linux-musl
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
+# Multi-stage build for efficient container
+FROM rust:1.75 AS builder
 
+# Create app directory
+WORKDIR /app
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source code
+COPY src ./src
+
+# Build for release
+RUN cargo build --release
+
+# Runtime stage - use Ubuntu for bws CLI compatibility
+FROM ubuntu:22.04
+
+# Install required packages
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install bws CLI
+RUN curl -L "https://github.com/bitwarden/sdk/releases/latest/download/bws-x86_64-unknown-linux-gnu.zip" -o bws.zip \
+    && unzip bws.zip \
+    && chmod +x bws \
+    && mv bws /usr/local/bin/ \
+    && rm bws.zip
+
+# Copy the built binary from builder stage
+COPY --from=builder /app/target/release/bitwarden-mcp-server /usr/local/bin/bitwarden-mcp-server
+
+# Create non-root user for security
+RUN useradd -r -s /bin/false -m bitwarden
+
+# Switch to non-root user
+USER bitwarden
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Set default environment variables
+ENV RUST_LOG=info
+
+# Run the server
+CMD ["bitwarden-mcp-server"]
 # Copy source code
 COPY . .
 
