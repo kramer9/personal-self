@@ -1,103 +1,112 @@
-use actix_web::{get, http::header::AUTHORIZATION, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use std::convert::Infallible;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use warp::{Filter, Reply, http::StatusCode};
+
 use bitwarden::{
-    auth::login::AccessTokenLoginRequest,
-    client::{client_settings::{ClientSettings, DeviceType}, Client},
-    client::traits::{ClientAuthExt, ClientSecretsExt},
-    error::Result as BWResult,
-    secrets_manager::secrets::SecretIdentifiersRequest,
+    client::client_settings::{ClientSettings, DeviceType},
+    Client,
+    secrets_manager::secrets::{SecretIdentifiersRequest, SecretGetRequest},
+    error::Result,
 };
-use serde::Serialize;
-use std::env;
-use tokio_retry::strategy::ExponentialBackoff;
-use tokio_retry::Retry;
-use tracing::{error, info};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+#[derive(Deserialize)]
+struct SecretParams {
+    _org_id: String,
+    _secret_key: String,
+}
 
 #[derive(Serialize)]
 struct SecretResponse {
-    message: String,
-    secret: String,
+    key: String,
+    value: String,
 }
 
-#[get("/secret/{name}")]
-async fn get_secret(req: HttpRequest, path: web::Path<String>) -> impl Responder {
-    let name = path.into_inner();
-
-    let expected_api_key = env::var("MCP_API_KEY").unwrap_or_else(|_| "changeme".to_string());
-    let auth_header = req.headers().get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-    if auth_header != Some(&format!("Bearer {}", expected_api_key)) {
-        error!("Unauthorized access attempt");
-        return HttpResponse::Unauthorized().body("Unauthorized");
-    }
-
-    info!("Authorized request for secret '{}'", &name);
-
-    let bw_token = match env::var("BITWARDEN_ACCESS_TOKEN") {
-        Ok(t) => t,
-        Err(_) => {
-            error!("BITWARDEN_ACCESS_TOKEN env var not set");
-            return HttpResponse::InternalServerError().body("Bitwarden token missing");
-        }
-    };
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _access_token = std::env::var("BW_ACCESS_TOKEN")
+        .expect("BW_ACCESS_TOKEN must be set in environment");
 
     let settings = ClientSettings {
         identity_url: "https://identity.bitwarden.com".to_string(),
         api_url: "https://api.bitwarden.com".to_string(),
-        user_agent: "MCP-Bitwarden-Server-Rust".to_string(),
+        user_agent: "bitwarden-mcp-server-rust/0.1".to_string(),
         device_type: DeviceType::SDK,
     };
 
-    let mut client = Client::new(Some(settings));
+    let client = Client::new(Some(settings));
 
-    let login_req = AccessTokenLoginRequest {
-        access_token: bw_token,
-        state_file: None,
-    };
+    let client = Arc::new(Mutex::new(client));
+    let client_filter = warp::any().map(move || client.clone());
 
-    if let Err(e) = client.auth().login_access_token(&login_req).await {
-        error!("Bitwarden client auth failed: {:?}", e);
-        return HttpResponse::InternalServerError().body("Bitwarden authentication failed");
-    }
+    let secret_route = warp::path!("secret" / String / String)
+        .and(client_filter)
+        .and_then(get_secret_handler);
 
-    let org_id = Some(Uuid::nil());
+    println!("MCP server running at http://127.0.0.1:8080");
+    warp::serve(secret_route).run(([127, 0, 0, 1], 8080)).await;
 
-    let req = SecretIdentifiersRequest {
-        organization_id: org_id.unwrap(),
-    };
-
-    let retry_strategy = ExponentialBackoff::from_millis(50).take(3);
-
-    let name_clone = name.clone();
-
-    let secret_result = Retry::spawn(retry_strategy, || async {
-        let secrets_resp = client.secrets().list(&req).await?;
-        let secret = secrets_resp.data.iter()
-            .find(|s| s.key == name_clone)
-            .ok_or_else(|| bitwarden::error::Error::MissingFields)?;
-        Ok::<_, bitwarden::error::Error>(secret.key.clone())
-    }).await;
-
-    match secret_result {
-        Ok(secret_val) => HttpResponse::Ok().json(SecretResponse {
-            message: format!("Secret fetched for '{}'", &name),
-            secret: secret_val,
-        }),
-        Err(e) => {
-            error!("Failed to fetch secret '{}': {:?}", &name, e);
-            HttpResponse::InternalServerError().body("Failed to fetch secret")
-        }
-    }
+    Ok(())
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    tracing_subscriber::fmt().init();
+async fn get_secret_handler(
+    org_id_str: String,
+    secret_key: String,
+    client: Arc<Mutex<Client>>,
+) -> Result<impl warp::Reply, Infallible> {
+    let org_id = match Uuid::parse_str(&org_id_str) {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            return Ok(
+                warp::reply::with_status("Invalid org_id", StatusCode::BAD_REQUEST)
+                    .into_response(),
+            );
+        }
+    };
 
-    let port: u16 = env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(3000);
-    info!("Starting MCP-Bitwarden server on port {}", port);
+    let mut client = client.lock().await;
 
-    HttpServer::new(|| App::new().service(get_secret))
-        .bind(("0.0.0.0", port))?
-        .run()
-        .await
+    let list_req = SecretIdentifiersRequest { organization_id: org_id };
+
+    let secrets_response = match client.secrets().list(&list_req).await {
+        Ok(resp) => resp,
+        Err(_) => {
+            return Ok(
+                warp::reply::with_status("Failed to list secrets", StatusCode::INTERNAL_SERVER_ERROR)
+                    .into_response(),
+            );
+        }
+    };
+
+    let secret_identifier_opt = secrets_response.data.iter().find(|s| s.key == secret_key);
+
+    if let Some(secret_identifier) = secret_identifier_opt {
+        let get_req = SecretGetRequest {
+            id: secret_identifier.id,
+        };
+
+        let secret = match client.secrets().get(&get_req).await {
+            Ok(secret) => secret,
+            Err(_) => {
+                return Ok(
+                    warp::reply::with_status("Failed to get secret", StatusCode::INTERNAL_SERVER_ERROR)
+                        .into_response(),
+                );
+            }
+        };
+
+        let response = SecretResponse {
+            key: secret_key,
+            value: secret.value,
+        };
+
+        Ok(warp::reply::json(&response).into_response())
+    } else {
+        Ok(
+            warp::reply::with_status("Secret not found", StatusCode::NOT_FOUND)
+                .into_response(),
+        )
+    }
 }
