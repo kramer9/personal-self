@@ -31,7 +31,6 @@ fi
 AUTO_UPDATE_CONTAINERS=$(podman ps --filter label=io.containers.autoupdate=registry --format "{{.ID}}")
 
 declare -a CHECKED_CONTAINERS_ARR=()
-declare -a NEEDS_UPDATE_CONTAINERS_ARR=()
 declare -a NOT_UPDATED_NO_LABEL_ARR=()
 declare -A CONTAINER_UNIT_MAP
 
@@ -47,7 +46,37 @@ for container_id in $AUTO_UPDATE_CONTAINERS; do
     fi
 done
 
-# --- 2. Run podman auto-update (ignore known errors) ---
+# --- 2. Get which containers need update BEFORE running auto-update ---
+NEEDS_UPDATE_CONTAINERS_BEFORE_ARR=()
+declare -A CONTAINER_STATUS_BEFORE
+if [[ ${#CHECKED_CONTAINERS_ARR[@]} -gt 0 ]]; then
+    set +e
+    DRY_RUN_JSON_BEFORE_UPDATE=$(podman auto-update --dry-run --format json)
+    JQ_EXIT=0
+    
+    # Get containers that need updates
+    NEEDS_UPDATE_CONTAINERS_BEFORE=$(echo "$DRY_RUN_JSON_BEFORE_UPDATE" | jq -r '.[] | select(.Updated == "pending") | .ContainerName' 2>/dev/null) || JQ_EXIT=$?
+    
+    # Also capture all container statuses for comparison
+    while IFS= read -r line; do
+        container_name=$(echo "$line" | jq -r '.ContainerName')
+        status=$(echo "$line" | jq -r '.Updated')
+        CONTAINER_STATUS_BEFORE["$container_name"]="$status"
+    done <<< "$(echo "$DRY_RUN_JSON_BEFORE_UPDATE" | jq -c '.[]' 2>/dev/null || echo "")"
+    
+    set -e
+    echo "DEBUG: jq exit code (before): $JQ_EXIT"
+    if [[ $JQ_EXIT -eq 0 ]]; then
+        while read -r container_name; do
+            [[ -n "$container_name" ]] && NEEDS_UPDATE_CONTAINERS_BEFORE_ARR+=("$container_name")
+        done <<< "$NEEDS_UPDATE_CONTAINERS_BEFORE"
+    else
+        echo "WARNING: jq failed to parse DRY_RUN_JSON_BEFORE_UPDATE"
+    fi
+    echo "DEBUG: Containers needing update before: ${NEEDS_UPDATE_CONTAINERS_BEFORE_ARR[*]}"
+fi
+
+# --- 3. Run podman auto-update (ignore known errors) ---
 if [[ ${#CHECKED_CONTAINERS_ARR[@]} -gt 0 ]]; then
     echo "DEBUG: About to run podman auto-update"
     # Suppress errors about containers without PODMAN_SYSTEMD_UNIT label
@@ -55,46 +84,66 @@ if [[ ${#CHECKED_CONTAINERS_ARR[@]} -gt 0 ]]; then
     echo "DEBUG: podman auto-update exit code: $?"
 fi
 
-# --- 3. Get which containers still need update (after update) ---
-NEEDS_UPDATE_CONTAINERS_ARR=()
+# --- 4. Get which containers still need update AFTER running auto-update ---
+NEEDS_UPDATE_CONTAINERS_AFTER_ARR=()
+declare -A CONTAINER_STATUS_AFTER
+declare -a FAILED_UPDATE_CONTAINERS_ARR=()
+
 if [[ ${#CHECKED_CONTAINERS_ARR[@]} -gt 0 ]]; then
     set +e
-    DRY_RUN_JSON_POST_UPDATE=$(podman auto-update --dry-run --format json)
+    DRY_RUN_JSON_AFTER_UPDATE=$(podman auto-update --dry-run --format json)
     JQ_EXIT=0
-    NEEDS_UPDATE_CONTAINERS_POST_UPDATE=$(echo "$DRY_RUN_JSON_POST_UPDATE" | jq -r '.[] | select(.Updated == "pending") | .ContainerName' 2>/dev/null) || JQ_EXIT=$?
+    
+    # Get containers that still need updates
+    NEEDS_UPDATE_CONTAINERS_AFTER=$(echo "$DRY_RUN_JSON_AFTER_UPDATE" | jq -r '.[] | select(.Updated == "pending") | .ContainerName' 2>/dev/null) || JQ_EXIT=$?
+    
+    # Get containers that failed to update
+    FAILED_UPDATE_CONTAINERS=$(echo "$DRY_RUN_JSON_AFTER_UPDATE" | jq -r '.[] | select(.Updated == "failed") | .ContainerName' 2>/dev/null) || JQ_EXIT=$?
+    
+    # Capture all container statuses for comparison
+    while IFS= read -r line; do
+        container_name=$(echo "$line" | jq -r '.ContainerName')
+        status=$(echo "$line" | jq -r '.Updated')
+        CONTAINER_STATUS_AFTER["$container_name"]="$status"
+    done <<< "$(echo "$DRY_RUN_JSON_AFTER_UPDATE" | jq -c '.[]' 2>/dev/null || echo "")"
+    
     set -e
-    echo "DEBUG: jq exit code: $JQ_EXIT"
+    echo "DEBUG: jq exit code (after): $JQ_EXIT"
     if [[ $JQ_EXIT -eq 0 ]]; then
         while read -r container_name; do
-            [[ -n "$container_name" ]] && NEEDS_UPDATE_CONTAINERS_ARR+=("$container_name")
-        done <<< "$NEEDS_UPDATE_CONTAINERS_POST_UPDATE"
+            [[ -n "$container_name" ]] && NEEDS_UPDATE_CONTAINERS_AFTER_ARR+=("$container_name")
+        done <<< "$NEEDS_UPDATE_CONTAINERS_AFTER"
+        
+        while read -r container_name; do
+            [[ -n "$container_name" ]] && FAILED_UPDATE_CONTAINERS_ARR+=("$container_name")
+        done <<< "$FAILED_UPDATE_CONTAINERS"
     else
-        echo "WARNING: jq failed to parse DRY_RUN_JSON_POST_UPDATE"
+        echo "WARNING: jq failed to parse DRY_RUN_JSON_AFTER_UPDATE"
     fi
-    echo "DEBUG: Finished parsing DRY_RUN_JSON_POST_UPDATE"
+    echo "DEBUG: Containers needing update after: ${NEEDS_UPDATE_CONTAINERS_AFTER_ARR[*]}"
+    echo "DEBUG: Containers with failed updates: ${FAILED_UPDATE_CONTAINERS_ARR[*]}"
 fi
 
-# --- 4. Get list of updated containers ---
+# --- 5. Determine which containers were actually updated ---
 UPDATED_CONTAINERS_ARR=()
-if [[ ${#CHECKED_CONTAINERS_ARR[@]} -gt 0 ]]; then
-    set +e
-    UPDATE_JSON=$(podman auto-update --dry-run --format json)
-    UPDATED_CONTAINERS=$(echo "$UPDATE_JSON" | jq -r '.[] | select(.Updated == "updated") | .ContainerName' 2>/dev/null)
-    set -e
-    while read -r container_name; do
-        [[ -n "$container_name" ]] && UPDATED_CONTAINERS_ARR+=("$container_name")
-    done <<< "$UPDATED_CONTAINERS"
-fi
+for container_name in "${NEEDS_UPDATE_CONTAINERS_BEFORE_ARR[@]}"; do
+    # If container needed update before but doesn't need it after AND didn't fail, it was updated
+    if [[ ! " ${NEEDS_UPDATE_CONTAINERS_AFTER_ARR[*]} " =~ " $container_name " ]] && [[ ! " ${FAILED_UPDATE_CONTAINERS_ARR[*]} " =~ " $container_name " ]]; then
+        UPDATED_CONTAINERS_ARR+=("$container_name")
+    fi
+done
 
-# --- 5. Compute containers already up-to-date ---
+echo "DEBUG: Containers actually updated: ${UPDATED_CONTAINERS_ARR[*]}"
+
+# --- 6. Compute containers already up-to-date ---
 declare -a ALREADY_UPTODATE_CONTAINERS_ARR=()
 for cname in "${CHECKED_CONTAINERS_ARR[@]}"; do
-    if [[ ! " ${UPDATED_CONTAINERS_ARR[*]} " =~ " $cname " ]] && [[ ! " ${NEEDS_UPDATE_CONTAINERS_ARR[*]} " =~ " $cname " ]]; then
+    if [[ ! " ${UPDATED_CONTAINERS_ARR[*]} " =~ " $cname " ]] && [[ ! " ${NEEDS_UPDATE_CONTAINERS_AFTER_ARR[*]} " =~ " $cname " ]] && [[ ! " ${FAILED_UPDATE_CONTAINERS_ARR[*]} " =~ " $cname " ]]; then
         ALREADY_UPTODATE_CONTAINERS_ARR+=("$cname")
     fi
 done
 
-# --- 6. Format function ---
+# --- 7. Format function ---
 format_containers() {
     local -n arr_ref=$1
     local with_unit=${2:-no}  # default to no if not provided
@@ -110,23 +159,33 @@ format_containers() {
     echo -e "$output"
 }
 
-# --- 7. Construct Slack message ---
+# --- 8. Construct Slack message ---
 MESSAGE_HEADER="*Podman Auto-Update Report ($(date +%F))*"
+
+# Add alert emoji if there are failures or pending updates
+ALERT_EMOJI=""
+if [[ ${#FAILED_UPDATE_CONTAINERS_ARR[@]} -gt 0 ]] || [[ ${#NEEDS_UPDATE_CONTAINERS_AFTER_ARR[@]} -gt 0 ]]; then
+    ALERT_EMOJI="⚠️ "
+fi
 
 SUMMARY="
 *Summary:*
 • Containers checked: ${#CHECKED_CONTAINERS_ARR[@]}
 • Containers not updated (missing PODMAN_SYSTEMD_UNIT label): ${#NOT_UPDATED_NO_LABEL_ARR[@]}
 • Containers updated during this run: ${#UPDATED_CONTAINERS_ARR[@]}
+• Containers with failed updates: ${#FAILED_UPDATE_CONTAINERS_ARR[@]}
+• Containers still needing updates: ${#NEEDS_UPDATE_CONTAINERS_AFTER_ARR[@]}
 • Containers already up-to-date: ${#ALREADY_UPTODATE_CONTAINERS_ARR[@]}
 "
 
 CHECKED_LIST=$(format_containers CHECKED_CONTAINERS_ARR unit)
 NOT_UPDATED_LIST=$(format_containers NOT_UPDATED_NO_LABEL_ARR)
 UPDATED_LIST=$(format_containers UPDATED_CONTAINERS_ARR)
+FAILED_LIST=$(format_containers FAILED_UPDATE_CONTAINERS_ARR)
+STILL_PENDING_LIST=$(format_containers NEEDS_UPDATE_CONTAINERS_AFTER_ARR)
 UPTODATE_LIST=$(format_containers ALREADY_UPTODATE_CONTAINERS_ARR)
 
-FULL_MESSAGE="$MESSAGE_HEADER
+FULL_MESSAGE="${ALERT_EMOJI}$MESSAGE_HEADER
 
 $SUMMARY
 ---
@@ -136,12 +195,28 @@ $CHECKED_LIST
 *Containers not updated (missing PODMAN_SYSTEMD_UNIT label):*
 $NOT_UPDATED_LIST
 *Containers updated during this run:*
-$UPDATED_LIST
+$UPDATED_LIST"
+
+# Only add failed updates section if there are failures
+if [[ ${#FAILED_UPDATE_CONTAINERS_ARR[@]} -gt 0 ]]; then
+    FULL_MESSAGE="${FULL_MESSAGE}
+*Containers with failed updates:*
+$FAILED_LIST"
+fi
+
+# Only add still pending section if there are containers still needing updates
+if [[ ${#NEEDS_UPDATE_CONTAINERS_AFTER_ARR[@]} -gt 0 ]]; then
+    FULL_MESSAGE="${FULL_MESSAGE}
+*Containers still needing updates:*
+$STILL_PENDING_LIST"
+fi
+
+FULL_MESSAGE="${FULL_MESSAGE}
 *Containers already up-to-date:*
 $UPTODATE_LIST
 "
 
-# --- 8. Trim message if it exceeds Slack limit ---
+# --- 9. Trim message if it exceeds Slack limit ---
 MAX_LENGTH=2900
 if (( ${#FULL_MESSAGE} > MAX_LENGTH )); then
     SLACK_MESSAGE="${FULL_MESSAGE:0:$MAX_LENGTH}...\n*Message truncated due to length.*"
@@ -149,7 +224,7 @@ else
     SLACK_MESSAGE="$FULL_MESSAGE"
 fi
 
-# --- 9. Send message to Slack ---
+# --- 10. Send message to Slack ---
 payload=$(jq -n --arg text "$SLACK_MESSAGE" '{text: $text}')
 echo "DEBUG: About to send Slack message to: $WEBHOOK_URL"
 echo "DEBUG: Message to send: $SLACK_MESSAGE"
