@@ -6,6 +6,10 @@ set -e ## exit on any error
 ## sudo adduser osint vboxsf
 ##
 echo '######'
+echo '## remove sudo pw prompt ##'
+echo '######'
+echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" | sudo tee -a /etc/sudoers
+echo '######'
 echo '## remove image stuff ##'
 echo '######'
 sudo apt purge -y apport
