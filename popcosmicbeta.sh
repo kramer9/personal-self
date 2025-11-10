@@ -8,7 +8,17 @@ set -e ## exit on any error
 echo '######'
 echo '## remove sudo pw prompt ##'
 echo '######'
-echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" | sudo tee -a /etc/sudoers
+
+SUDOERS_LINE="${USERNAME} ALL=(ALL) NOPASSWD: ALL"
+
+# Check if the line already exists in sudoers
+if sudo grep -qF "${SUDOERS_LINE}" /etc/sudoers; then
+    echo "Sudoers entry already exists - skipping"
+else
+    echo "Adding sudoers entry..."
+    echo "${SUDOERS_LINE}" | sudo tee -a /etc/sudoers
+    echo "Sudoers entry added successfully"
+fi
 echo '######'
 echo '## remove image stuff ##'
 echo '######'
