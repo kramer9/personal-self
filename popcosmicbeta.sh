@@ -8,20 +8,17 @@ set -e ## exit on any error
 echo '######'
 echo '## remove sudo pw prompt ##'
 echo '######'
-
 ACTUAL_USER="${SUDO_USER:-$USER}"
 SUDOERS_FILE="/etc/sudoers.d/${ACTUAL_USER}-nopasswd"
 SUDOERS_LINE="${ACTUAL_USER} ALL=(ALL) NOPASSWD: ALL"
-
 if [ -f "${SUDOERS_FILE}" ]; then
-    echo "Sudoers entry already exists - skipping"
+echo "Sudoers entry already exists - skipping"
 else
-    echo "Creating sudoers entry for user: ${ACTUAL_USER}"
-    echo "${SUDOERS_LINE}" | sudo tee "${SUDOERS_FILE}"
-    sudo chmod 0440 "${SUDOERS_FILE}"
-    echo "Sudoers entry created successfully"
+echo "Creating sudoers entry for user: ${ACTUAL_USER}"
+echo "${SUDOERS_LINE}" | sudo tee "${SUDOERS_FILE}"
+sudo chmod 0440 "${SUDOERS_FILE}"
+echo "Sudoers entry created successfully"
 fi
-
 echo '######'
 echo '## remove image stuff ##'
 echo '######'
@@ -31,13 +28,29 @@ sudo apt remove -y --purge libreoffice* ## remove libre in favor of onlyoffice
 sudo apt-get clean -y
 sudo apt-get autoremove -y
 sudo apt update -y && sudo apt upgrade -y
-
 echo '######'
 echo '## needed for cut/paste utils with qemu ##'
 echo '######'
 sudo apt install -y spice-vdagent
 ## sudo apt install -y build-essential dkms gcc make perl
 ## sudo rcvboxadd setup
+
+echo '######'
+echo '## install nomachine for remote access ##'
+echo '######'
+NOMACHINE_URL="https://github.com/kramer9/Self/releases/download/nomachine/nomachine_9.2.18_3_amd64.deb"
+NOMACHINE_DEB="/tmp/nomachine_9.2.18_3_amd64.deb"
+if command -v nxserver &> /dev/null; then
+    echo "NoMachine already installed - skipping"
+else
+    echo "Downloading NoMachine..."
+    wget -O "${NOMACHINE_DEB}" "${NOMACHINE_URL}"
+    echo "Installing NoMachine..."
+    sudo dpkg -i "${NOMACHINE_DEB}"
+    sudo apt-get install -f -y ## fix any missing dependencies
+    rm "${NOMACHINE_DEB}"
+    echo "NoMachine installed successfully"
+fi
 
 echo '######'
 echo '## yubico stuff ##'
@@ -52,8 +65,8 @@ echo '######'
 sudo apt install -y khotkeys ## needed for flameshot
 flatpak list
 flatpak update -y
-
 exit 0
+
 ## flatpak uninstall org.gimp.GIMP
 ##flatpak install flathub io.atom.Atom org.audacityteam.Audacity com.calibre_ebook.calibre org.gnome.DejaDup org.gnome.EasyTAG org.electrum.electrum  im.riot.Riot org.mozilla.firefox org.freefilesync.FreeFileSync org.gimp.GIMP org.gnucash.GnuCash fr.handbrake.ghb org.keepassxc.KeePassXC tv.kodi.Kodi com.getmailspring.Mailspring com.gitlab.newsflash org.onlyoffice.desktopeditors ch.protonmail.protonmail-bridge org.signal.Signal org.standardnotes.standardnotes com.github.micahflee.torbrowser-launcher com.transmissionbt.Transmission org.videolan.VLC com.wire.WireDesktop -y
 flatpak install flathub org.mozilla.firefox org.freefilesync.FreeFileSync fr.handbrake.ghb org.onlyoffice.desktopeditors com.github.micahflee.torbrowser-launcher com.transmissionbt.Transmission org.videolan.VLC com.yubico.yubioath org.flameshot.Flameshot bitwarden -y
