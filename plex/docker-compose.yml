@@ -1,0 +1,309 @@
+---
+# =============================================================================
+# Plex Media Server Stack
+# Host: Thelio @ 192.168.2.27 | Pop!_OS 22.04
+# Location: /home/argus/Repos/personal-self/plex/docker-compose.yml
+# =============================================================================
+
+networks:
+  # Internal bridge for all services to communicate
+  media_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+  # Isolated network for VPN-routed containers
+  vpn_net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+volumes:
+  # Named volume for qBittorrent config so it persists independent of VPN container lifecycle
+  qbittorrent_config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/argus/Drives/1TBa/appdata/plex-stack/qbittorrent/config
+
+services:
+
+  # ===========================================================================
+  # NORDLYNX — Dedicated WireGuard VPN gateway for download client traffic
+  # Kill switch is built-in: if tunnel drops, all traffic is blocked
+  # SYS_MODULE not needed — nordlynx loads the kernel module automatically
+  # ===========================================================================
+  nordvpn:
+    image: ghcr.io/bubuntux/nordlynx:latest
+    container_name: nordvpn
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.disable_ipv6=1   # Prevent IPv6 leaks
+    environment:
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - CONNECT=United_States              # Server group or country
+      - NET_LOCAL=192.168.2.0/24          # Allow LAN through — needed to reach qBit Web UI
+      - TZ=America/Denver
+    ports:
+      # qBittorrent Web UI — exposed via this container since qBit shares our network namespace
+      - "8080:8080"
+      # qBittorrent BitTorrent port
+      - "6881:6881"
+      - "6881:6881/udp"
+    volumes:
+      - /lib/modules:/lib/modules:ro      # Required for WireGuard kernel module
+    networks:
+      - media_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "https://api.nordvpn.com/v1/helpers/ips/insights"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # QBITTORRENT — Download client, routed through NordLynx
+  # Shares NordLynx network namespace — all traffic exits via VPN
+  # ===========================================================================
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:nordvpn"         # All traffic routes through NordLynx
+    depends_on:
+      nordvpn:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+      - WEBUI_PORT=8080
+      - TORRENTING_PORT=6881
+    volumes:
+      - qbittorrent_config:/config
+      - /home/argus/Drives/2TBa/downloads:/downloads
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # PLEX MEDIA SERVER
+  # Transcoding stays on local SSD, media libraries read from NFS
+  # ===========================================================================
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM}            # Get from https://plex.tv/claim (5-min token)
+    volumes:
+      - /home/argus/Drives/1TBa/plex/config:/config
+      - /home/argus/Drives/1TBa/plex/transcode:/transcode  # Local SSD — required
+      - /mnt/nas/vol1/movies:/data/movies:ro
+      - /mnt/nas/vol2/tv:/data/tv:ro
+      - /mnt/nas/vol2/other:/data/other:ro
+      - /mnt/usbdrive/plex/lidarr:/data/music:ro
+    ports:
+      - "32400:32400"             # Plex Web UI / clients
+      - "1900:1900/udp"           # DLNA
+      - "5353:5353/udp"           # Bonjour/Avahi
+      - "8324:8324"               # Roku via Plex Companion
+      - "32410:32410/udp"         # GDM network discovery
+      - "32412:32412/udp"
+      - "32413:32413/udp"
+      - "32414:32414/udp"
+      - "32469:32469"             # DLNA
+    networks:
+      - media_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "-s", "http://localhost:32400/identity"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # OVERSEERR — Media request management for Plex (movies + TV)
+  # ===========================================================================
+  overseerr:
+    image: lscr.io/linuxserver/overseerr:latest
+    container_name: overseerr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - /home/argus/Drives/1TBa/appdata/plex-stack/overseerr/config:/config
+    ports:
+      - "5055:5055"
+    networks:
+      - media_net
+    depends_on:
+      - plex
+      - radarr
+      - sonarr
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "-s", "http://localhost:5055/api/v1/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # SONARR — TV show automation
+  # Monitors downloads path, moves completed shows to NAS on import
+  # ===========================================================================
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - /home/argus/Drives/1TBa/appdata/plex-stack/sonarr/config:/config
+      - /home/argus/Drives/2TBa/downloads:/downloads      # Source: where qBit drops files
+      - /mnt/nas/vol2/tv:/tv                               # Dest: NAS TV library
+    ports:
+      - "8989:8989"
+    networks:
+      - media_net
+    depends_on:
+      - qbittorrent
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "-s", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # RADARR — Movie automation
+  # Monitors downloads path, moves completed movies to NAS on import
+  # ===========================================================================
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - /home/argus/Drives/1TBa/appdata/plex-stack/radarr/config:/config
+      - /home/argus/Drives/2TBa/downloads:/downloads      # Source
+      - /mnt/nas/vol1/movies:/movies                       # Dest: NAS movie library
+    ports:
+      - "7878:7878"
+    networks:
+      - media_net
+    depends_on:
+      - qbittorrent
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "-s", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # LIDARR — Music automation
+  # ===========================================================================
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - /home/argus/Drives/1TBa/appdata/plex-stack/lidarr/config:/config
+      - /home/argus/Drives/2TBa/downloads:/downloads
+      - /mnt/usbdrive/plex/lidarr:/music                  # Dest: USB music library
+    ports:
+      - "8686:8686"
+    networks:
+      - media_net
+    depends_on:
+      - qbittorrent
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "-s", "http://localhost:8686/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # PROWLARR — Indexer manager (feeds indexers to all *arr apps automatically)
+  # Replaces manually configuring indexers in each *arr app
+  # ===========================================================================
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - /home/argus/Drives/1TBa/appdata/plex-stack/prowlarr/config:/config
+    ports:
+      - "9696:9696"
+    networks:
+      - media_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "-s", "http://localhost:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # ===========================================================================
+  # WATCHTOWER — Automatic container image updates
+  # Polls every 24h, only updates containers with the watchtower.enable label
+  # ===========================================================================
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    environment:
+      - TZ=America/Denver
+      - WATCHTOWER_CLEANUP=true             # Remove old images after update
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - WATCHTOWER_LABEL_ENABLE=true        # Only update labeled containers
+      - WATCHTOWER_POLL_INTERVAL=86400      # Check every 24 hours
+      - WATCHTOWER_NOTIFICATION_URL=${WATCHTOWER_NOTIFICATION_URL:-}  # Optional: ntfy/Slack/Discord
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - media_net
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
