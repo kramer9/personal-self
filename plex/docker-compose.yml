@@ -307,3 +307,16 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+
+  flaresolverr:
+      image: ghcr.io/flaresolverr/flaresolverr:latest
+      container_name: flaresolverr
+      environment:
+        - LOG_LEVEL=info
+      ports:
+        - "8191:8191"
+      restart: unless-stopped
+      networks:
+        - media_net
+      labels:
+        - "com.centurylinklabs.watchtower.enable=true"
