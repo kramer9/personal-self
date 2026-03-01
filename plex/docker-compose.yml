@@ -68,8 +68,6 @@ services:
       timeout: 15s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
   # ===========================================================================
   # QBITTORRENT — Download client, routed through NordLynx
@@ -92,8 +90,6 @@ services:
       - qbittorrent_config:/config
       - /home/argus/Drives/2TBa/downloads:/downloads
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
   # ===========================================================================
   # PLEX MEDIA SERVER
@@ -134,8 +130,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+
 
   # ===========================================================================
   # OVERSEERR — Media request management for Plex (movies + TV)
@@ -164,8 +159,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+
 
   # ===========================================================================
   # SONARR — TV show automation
@@ -195,8 +189,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+
 
   # ===========================================================================
   # RADARR — Movie automation
@@ -226,8 +219,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+
 
   # ===========================================================================
   # LIDARR — Music automation
@@ -256,8 +248,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+
 
   # ===========================================================================
   # PROWLARR — Indexer manager (feeds indexers to all *arr apps automatically)
@@ -283,30 +274,9 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
-  # ===========================================================================
-  # WATCHTOWER — Automatic container image updates
-  # Polls every 24h, only updates containers with the watchtower.enable label
-  # ===========================================================================
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: watchtower
-    environment:
-      - TZ=America/Denver
-      - WATCHTOWER_CLEANUP=true             # Remove old images after update
-      - WATCHTOWER_INCLUDE_RESTARTING=true
-      - WATCHTOWER_LABEL_ENABLE=true        # Only update labeled containers
-      - WATCHTOWER_POLL_INTERVAL=86400      # Check every 24 hours
-      - WATCHTOWER_NOTIFICATION_URL=${WATCHTOWER_NOTIFICATION_URL:-}  # Optional: ntfy/Slack/Discord
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - media_net
-    restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+
+
 
   flaresolverr:
       image: ghcr.io/flaresolverr/flaresolverr:latest
