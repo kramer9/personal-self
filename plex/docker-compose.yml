@@ -11,7 +11,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/24
+        - subnet: 172.22.0.0/24
 
   # Isolated network for VPN-routed containers
   vpn_net:
@@ -19,7 +19,7 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: 172.21.0.0/24
+        - subnet: 172.23.0.0/24
 
 volumes:
   # Named volume for qBittorrent config so it persists independent of VPN container lifecycle
